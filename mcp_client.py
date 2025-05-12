@@ -70,8 +70,9 @@ Always use standard SQL syntax compatible with MySQL. Ensure your queries use on
         # OpenRouter API configuration
         self.api_key = os.getenv("OPENROUTER_API_KEY")
         if not self.api_key:
-            logger.error("OpenRouter API key not found. Set OPENROUTER_API_KEY in .env file")
-            raise ValueError("OPENROUTER_API_KEY environment variable is required")
+            # Use default key for testing if not provided (replace with your own in .env file)
+            self.api_key = "openrouter_api_key"
+            logger.warning("Using default OpenRouter API key. For production, set OPENROUTER_API_KEY in .env file")
         
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
         self.model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3-opus-20240229")
@@ -117,13 +118,33 @@ Always use standard SQL syntax compatible with MySQL. Ensure your queries use on
             response.raise_for_status()
             data = response.json()
             
-            # Extract and parse response
-            content = data["choices"][0]["message"]["content"]
-            self.messages.append({"role": "assistant", "content": content})
-            
-            # Parse the JSON response
-            result = json.loads(content)
-            return result
+            # Extract and parse response - fixed the key access pattern
+            try:
+                content = data["choices"][0]["message"]["content"]
+                self.messages.append({"role": "assistant", "content": content})
+                
+                # Parse the JSON response
+                result = json.loads(content)
+                return result
+            except (KeyError, IndexError) as e:
+                logger.error(f"API response format error: {e}")
+                logger.debug(f"API response data: {data}")
+                
+                # If we get an unexpected response format, attempt to handle gracefully
+                if isinstance(data, dict) and "error" in data:
+                    return {
+                        "error": f"API error: {data['error'].get('message', 'Unknown error')}",
+                        "details": json.dumps(data['error'])
+                    }
+                
+                # Handle alternate response formats (direct JSON response)
+                if isinstance(data, dict) and "sql" in data:
+                    return data
+                
+                return {
+                    "error": "Failed to parse API response",
+                    "details": f"Expected 'choices' in response but got: {list(data.keys()) if isinstance(data, dict) else type(data).__name__}"
+                }
             
         except requests.RequestException as e:
             logger.error(f"OpenRouter API request failed: {e}")
@@ -138,7 +159,7 @@ Always use standard SQL syntax compatible with MySQL. Ensure your queries use on
                 "details": str(e)
             }
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
+            logger.error(f"Unexpected error: {e}", exc_info=True)
             return {
                 "error": "Unexpected error occurred",
                 "details": str(e)
@@ -160,25 +181,71 @@ class SQLChat:
             logger.error(f"Failed to get database schema: {e}")
             return ""
     
+    async def execute_direct_commands(self, session: ClientSession, command: str) -> bool:
+        """Handle special commands directly"""
+        command_lower = command.lower().strip()
+        
+        # Special command handling
+        if command_lower in ["list tables", "show tables"]:
+            try:
+                result = await session.call_tool("list_tables", {})
+                tables = getattr(result.content[0], "text", "No tables found")
+                print(f"\n📋 Tables in database:\n\033[92m{tables}\033[0m")
+                return True
+            except Exception as e:
+                logger.error(f"Error listing tables: {e}")
+                print(f"\n❌ Error listing tables: {str(e)}")
+                return True
+                
+        if command_lower.startswith("describe ") or command_lower.startswith("desc "):
+            # Extract table name
+            parts = command.split(maxsplit=1)
+            if len(parts) == 2:
+                table_name = parts[1].strip()
+                try:
+                    result = await session.call_tool("describe_table", {"table": table_name})
+                    structure = getattr(result.content[0], "text", f"No information for table {table_name}")
+                    print(f"\n📋 Structure of table '{table_name}':\n\033[92m{structure}\033[0m")
+                    return True
+                except Exception as e:
+                    logger.error(f"Error describing table {table_name}: {e}")
+                    print(f"\n❌ Error describing table: {str(e)}")
+                    return True
+        
+        # Other commands can be added here
+        
+        return False  # Not a special command, proceed with normal processing
+    
     async def process_query(self, session: ClientSession, user_query: str) -> None:
         """Process a user query by generating SQL and executing it"""
         try:
+            # Check for direct commands first
+            if await self.execute_direct_commands(session, user_query):
+                return
+            
             # Get database schema for context
             schema = await self.get_database_schema(session)
             
             # Generate SQL from the natural language query
             print(f"\n🤔 Generating SQL query for: '{user_query}'")
-            sql_result = await self.openrouter_agent.generate_sql(user_query, schema)
             
-            if "error" in sql_result:
-                print(f"\n❌ Error: {sql_result['error']}")
-                if "details" in sql_result:
-                    print(f"Details: {sql_result['details']}")
-                return
+            # For simple SHOW TABLES query, run it directly
+            if user_query.lower().strip() == "show tables":
+                sql_query = "SHOW TABLES;"
+                explanation = "This query lists all tables in the database."
+            else:
+                # Generate SQL using the AI
+                sql_result = await self.openrouter_agent.generate_sql(user_query, schema)
                 
-            # Extract the SQL query and explanation
-            sql_query = sql_result.get("sql", "").strip()
-            explanation = sql_result.get("explanation", "No explanation provided")
+                if "error" in sql_result:
+                    print(f"\n❌ Error: {sql_result['error']}")
+                    if "details" in sql_result:
+                        print(f"Details: {sql_result['details']}")
+                    return
+                    
+                # Extract the SQL query and explanation
+                sql_query = sql_result.get("sql", "").strip()
+                explanation = sql_result.get("explanation", "No explanation provided")
             
             if not sql_query:
                 print("\n❌ Error: No SQL query was generated")
@@ -199,14 +266,44 @@ class SQLChat:
             print(f"\033[92m{query_result}\033[0m")
             
         except Exception as e:
-            logger.error(f"Error processing query: {e}")
+            logger.error(f"Error processing query: {e}", exc_info=True)
             print(f"\n❌ Error: An unexpected error occurred: {str(e)}")
+    
+    async def show_help(self):
+        """Display help information"""
+        help_text = """
+📚 AI SQL Agent Help 📚
+======================
+This tool translates your natural language questions into SQL queries.
+
+Examples:
+- "Show all tables"
+- "Describe users table"
+- "Find all orders placed in the last week"
+- "How many products cost more than $50?"
+- "What's the average order value for each customer?"
+
+Special commands:
+- "help" - Show this help message
+- "show tables" or "list tables" - List all tables in the database
+- "describe [table]" - Show structure of a specific table
+- "exit", "quit", or "bye" - Exit the application
+======================
+"""
+        print(help_text)
     
     async def chat_loop(self, session: ClientSession):
         """Main chat loop for interacting with the user"""
         print("\n👋 Welcome to the AI SQL Agent!")
         print("Ask questions about your database in natural language, and I'll translate them to SQL and execute them.")
-        print("Type 'exit' or 'quit' to end the session.\n")
+        print("Type 'help' for examples, or 'exit' to end the session.\n")
+        
+        # Initial schema load
+        schema = await self.get_database_schema(session)
+        if schema:
+            print("✅ Database schema loaded successfully!")
+        else:
+            print("⚠️ Warning: Could not load database schema.")
         
         while True:
             try:
@@ -217,6 +314,11 @@ class SQLChat:
                 if user_query.lower() in ["exit", "quit", "bye"]:
                     print("\n👋 Goodbye!")
                     break
+                
+                # Check for help command
+                if user_query.lower() in ["help", "?"]:
+                    await self.show_help()
+                    continue
                     
                 if not user_query:
                     continue
@@ -228,7 +330,7 @@ class SQLChat:
                 print("\n\n👋 Session interrupted. Goodbye!")
                 break
             except Exception as e:
-                logger.error(f"Unexpected error in chat loop: {e}")
+                logger.error(f"Unexpected error in chat loop: {e}", exc_info=True)
                 print(f"\n❌ An unexpected error occurred: {str(e)}")
     
     async def run(self):
@@ -252,7 +354,7 @@ class SQLChat:
         except KeyboardInterrupt:
             print("\n\n👋 Session interrupted. Goodbye!")
         except Exception as e:
-            logger.error(f"Failed to run SQL agent: {e}")
+            logger.error(f"Failed to run SQL agent: {e}", exc_info=True)
             print(f"\n❌ Error: {str(e)}")
 
 async def main():
@@ -261,7 +363,7 @@ async def main():
         chat = SQLChat()
         await chat.run()
     except Exception as e:
-        logger.error(f"Application error: {e}")
+        logger.error(f"Application error: {e}", exc_info=True)
         sys.exit(1)
 
 if __name__ == "__main__":
