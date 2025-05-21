@@ -17,9 +17,9 @@ An AI-powered SQL agent that allows you to interact with MySQL databases using n
 ## Installation
 1. Clone this repository
    ```bash
-   git clone https://github.com/yourusername/ai-sql-agent.git
-   cd ai-sql-agent
-   ```
+   git clone [https://github.com/yashasraj2324/mysql_mcp.git]
+   cd mysql_mcp
+      ```
 2. Run the setup script
    ```bash
    chmod +x setup.sh
