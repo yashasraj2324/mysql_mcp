@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
 MySQL MCP Server
-
-This script provides a FastMCP server with tools for MySQL database operations.
 """
 
 import os
@@ -40,8 +38,8 @@ def get_db_config():
         "host": os.getenv("MYSQL_HOST", "localhost"),
         "port": int(os.getenv("MYSQL_PORT", "3306")),
         "user": os.getenv("MYSQL_USER", "root"),
-        "password": os.getenv("MYSQL_PASSWORD", ""),
-        "database": os.getenv("MYSQL_DATABASE", "")
+        "password": os.getenv("MYSQL_PASSWORD", "qwerty@#2324"),
+        "database": os.getenv("MYSQL_DATABASE", "admin2")
     }
     if not all([config["user"], config["password"], config["database"]]):
         logger.error("Missing required database configuration.")
